@@ -12,6 +12,7 @@ def reciprocal_rank_fusion(
     ranked_lists: list[list[Document]],
     rrf_k: int,
 ) -> list[Document]:
+    """使用 RRF 对多路排序结果进行融合。"""
     scored: dict[str, tuple[float, Document]] = {}
 
     for docs in ranked_lists:
@@ -42,13 +43,14 @@ def apply_mmr(
     lambda_mult: float = 0.7,
     final_k: int = Settings.mmr_final_k,
 ) -> list[Document]:
+    """使用 MMR 在保证相关性的同时减少结果冗余。"""
     if len(docs) <= final_k:
         return docs
 
     query_vec = np.array(embedding_model.embed_query(question))
-    doc_vecs = np.array(embedding_model.embed_documents([d.page_content for d in docs]))
+    doc_vecs = np.array(embedding_model.embed_documents([doc.page_content for doc in docs]))
 
-    # 直接调用 LangChain 内置 MMR，返回选中的下标列表
+    # 直接调用 LangChain 内置 MMR，返回被选中的下标列表
     selected_indices = maximal_marginal_relevance(
         query_embedding=query_vec,
         embedding_list=doc_vecs,
@@ -56,7 +58,7 @@ def apply_mmr(
         k=final_k,
     )
 
-    return [docs[i] for i in selected_indices]
+    return [docs[index] for index in selected_indices]
 
 
 def expand_to_parents(
@@ -64,6 +66,7 @@ def expand_to_parents(
     parent_store: dict[str, Document],
     final_parent_k: int,
 ) -> list[Document]:
+    """将子片段命中聚合回父片段。"""
     parent_hits: dict[str, dict] = defaultdict(
         lambda: {"count": 0, "first_rank": 10**9, "doc": None}
     )
@@ -88,11 +91,12 @@ def expand_to_parents(
 
 
 def format_docs(docs: list[Document]) -> str:
+    """将文档片段格式化为中文上下文。"""
     lines = []
     for index, doc in enumerate(docs, 1):
-        source = doc.metadata.get("source_file", "unknown")
-        parent_id = doc.metadata.get("parent_id", "NA")
+        source = doc.metadata.get("source_file", "未知文件")
+        parent_id = doc.metadata.get("parent_id", "未标记")
         lines.append(
-            f"[片段{index}] source={source}, parent={parent_id}\n{doc.page_content}"
+            f"[片段{index}] 来源文件={source}，父片段ID={parent_id}\n{doc.page_content}"
         )
     return "\n\n".join(lines)

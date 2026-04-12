@@ -9,6 +9,7 @@ from langchain_core.documents import Document
 
 
 def load_one_file(file_path: Path) -> list[Document]:
+    """按文件后缀选择对应加载器并补充基础元数据。"""
     suffix = file_path.suffix.lower()
 
     match suffix:
@@ -30,9 +31,9 @@ def load_one_file(file_path: Path) -> list[Document]:
 
 
 def load_all_documents(data_dir: Path) -> list[Document]:
+    """递归加载目录下所有支持的文档。"""
     all_docs: list[Document] = []
     for file_path in data_dir.rglob("*"):
         if file_path.is_file():
             all_docs.extend(load_one_file(file_path))
     return all_docs
-

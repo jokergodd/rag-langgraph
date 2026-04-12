@@ -16,37 +16,38 @@ from app.infrastructure.vectorstores.chroma_store import build_vectorstore
 
 
 def run_cli() -> None:
+    """命令行入口：初始化索引后进入交互式问答循环。"""
     if not settings.data_dir.exists():
-        raise FileNotFoundError(f"数据目录不存在: {settings.data_dir.resolve()}")
+        raise FileNotFoundError(f"数据目录不存在：{settings.data_dir.resolve()}")
 
     chat_model = build_chat_model(settings)
     embedding_model = build_embedding_model(settings)
 
     print("1) 加载文档...")
     raw_docs = load_all_documents(settings.data_dir)
-    print(f"原始文档数: {len(raw_docs)}")
+    print(f"原始文档数：{len(raw_docs)}")
 
-    print("2) 切分 parent...")
+    print("2) 切分父片段...")
     parent_docs = split_parent_documents(raw_docs, settings)
-    print(f"parent 数: {len(parent_docs)}")
+    print(f"父片段数：{len(parent_docs)}")
 
-    print("3) 切分 child...")
+    print("3) 切分子片段...")
     child_docs = split_child_documents(parent_docs, settings)
-    print(f"child 数: {len(child_docs)}")
+    print(f"子片段数：{len(child_docs)}")
 
     parent_store = build_parent_store(parent_docs)
 
     print("4) 构建向量库...")
     vectorstore = build_vectorstore(child_docs, embedding_model, settings)
 
-    print("5) 构建 child retrievers...")
+    print("5) 构建子片段检索器...")
     dense_retriever, bm25_retriever = build_child_retrievers(
         child_docs,
         vectorstore,
         settings,
     )
 
-    print("6) 构建 LangGraph chat workflow...")
+    print("6) 构建 LangGraph 中文问答工作流...")
     runtime = ChatGraphRuntime(
         model=chat_model,
         embedding_model=embedding_model,
@@ -58,7 +59,7 @@ def run_cli() -> None:
     chat_graph = build_chat_graph(runtime)
 
     while True:
-        question = input("\n请输入问题（输入 exit 退出）: ").strip()
+        question = input("\n请输入问题（输入 exit 退出）：").strip()
         if question.lower() in {"exit", "quit"}:
             break
         if not question:
@@ -69,12 +70,12 @@ def run_cli() -> None:
         print("\n===== LangGraph 执行摘要 =====")
         print(summarize_state(result))
 
-        print("\n===== 最终 parent 上下文 =====")
+        print("\n===== 最终父片段上下文 =====")
         docs = result.get("parent_docs", [])
         for index, doc in enumerate(docs, 1):
             print(
-                f"{index}. source={doc.metadata.get('source_file')} "
-                f"parent={doc.metadata.get('parent_id')}\n"
+                f"{index}. 来源文件={doc.metadata.get('source_file')} "
+                f"父片段ID={doc.metadata.get('parent_id')}\n"
                 f"{doc.page_content[:300]}\n"
             )
 

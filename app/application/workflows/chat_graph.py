@@ -19,6 +19,8 @@ from app.infrastructure.config.settings import Settings
 
 @dataclass(frozen=True)
 class ChatGraphRuntime:
+    """LangGraph 运行时依赖集合。"""
+
     model: object
     embedding_model: object
     dense_retriever: object
@@ -28,6 +30,7 @@ class ChatGraphRuntime:
 
 
 def _append_error(state: ChatGraphState, stage: str, exc: Exception) -> list[dict]:
+    """将节点异常追加到状态中的错误列表。"""
     errors = list(state.get("errors", []))
     errors.append(
         {
@@ -40,6 +43,7 @@ def _append_error(state: ChatGraphState, stage: str, exc: Exception) -> list[dic
 
 
 def _base_metrics(state: ChatGraphState) -> dict:
+    """确保指标字典中包含节点耗时容器。"""
     metrics = dict(state.get("metrics", {}))
     node_timings = dict(metrics.get("node_timings_ms", {}))
     metrics["node_timings_ms"] = node_timings
@@ -47,13 +51,17 @@ def _base_metrics(state: ChatGraphState) -> dict:
 
 
 def _time_node(state: ChatGraphState, node_name: str, started_at: float) -> dict:
+    """记录当前节点耗时。"""
     metrics = _base_metrics(state)
     metrics["node_timings_ms"][node_name] = round((perf_counter() - started_at) * 1000, 2)
     return metrics
 
 
 def build_chat_graph(runtime: ChatGraphRuntime):
+    """构建在线问答工作流图。"""
+
     def init_request(state: ChatGraphState) -> ChatGraphState:
+        """初始化请求基础信息与默认策略。"""
         started_at = perf_counter()
         next_state: ChatGraphState = {
             "request_id": state.get("request_id", str(uuid4())),
@@ -80,6 +88,10 @@ def build_chat_graph(runtime: ChatGraphRuntime):
         return next_state
 
     def authorize_request(state: ChatGraphState) -> ChatGraphState:
+        """权限校验节点。
+
+        当前先保留单租户默认放行逻辑，后续可在这里接入真正的权限系统。
+        """
         started_at = perf_counter()
         next_state: ChatGraphState = {
             "route": "answer",
@@ -90,6 +102,7 @@ def build_chat_graph(runtime: ChatGraphRuntime):
         return next_state
 
     def rewrite_query_node(state: ChatGraphState) -> ChatGraphState:
+        """问题改写节点，为后续混合检索生成多个等价问法。"""
         started_at = perf_counter()
         try:
             rewritten_queries = rewrite_queries(state["question"], runtime.model)
@@ -98,13 +111,13 @@ def build_chat_graph(runtime: ChatGraphRuntime):
             next_state = {
                 "rewritten_queries": [state["question"]],
                 "errors": _append_error(state, "rewrite_query", exc),
-                "warnings": list(state.get("warnings", []))
-                + ["query rewrite failed, fallback to original question"],
+                "warnings": list(state.get("warnings", [])) + ["问题改写失败，已回退为原始问题"],
             }
         next_state["metrics"] = _time_node(state | next_state, "rewrite_query", started_at)
         return next_state
 
     def retrieve_dense_node(state: ChatGraphState) -> ChatGraphState:
+        """向量检索节点。"""
         started_at = perf_counter()
         try:
             dense_ranked_lists = [
@@ -116,13 +129,13 @@ def build_chat_graph(runtime: ChatGraphRuntime):
             next_state = {
                 "dense_ranked_lists": [],
                 "errors": _append_error(state, "retrieve_dense", exc),
-                "warnings": list(state.get("warnings", []))
-                + ["dense retrieval failed, continue with sparse retrieval"],
+                "warnings": list(state.get("warnings", [])) + ["向量检索失败，继续执行关键词检索"],
             }
         next_state["metrics"] = _time_node(state | next_state, "retrieve_dense", started_at)
         return next_state
 
     def retrieve_sparse_node(state: ChatGraphState) -> ChatGraphState:
+        """关键词检索节点。"""
         started_at = perf_counter()
         try:
             sparse_ranked_lists = [
@@ -134,13 +147,13 @@ def build_chat_graph(runtime: ChatGraphRuntime):
             next_state = {
                 "sparse_ranked_lists": [],
                 "errors": _append_error(state, "retrieve_sparse", exc),
-                "warnings": list(state.get("warnings", []))
-                + ["sparse retrieval failed, continue with available results"],
+                "warnings": list(state.get("warnings", [])) + ["关键词检索失败，继续使用当前可用结果"],
             }
         next_state["metrics"] = _time_node(state | next_state, "retrieve_sparse", started_at)
         return next_state
 
     def fuse_results_node(state: ChatGraphState) -> ChatGraphState:
+        """汇聚向量检索与关键词检索结果，并执行 RRF 融合。"""
         started_at = perf_counter()
         ranked_lists = state.get("dense_ranked_lists", []) + state.get("sparse_ranked_lists", [])
         fused_child_docs = reciprocal_rank_fusion(ranked_lists, rrf_k=runtime.settings.rrf_k)
@@ -157,6 +170,7 @@ def build_chat_graph(runtime: ChatGraphRuntime):
         return next_state
 
     def rerank_results_node(state: ChatGraphState) -> ChatGraphState:
+        """对融合后的候选片段执行重排。"""
         started_at = perf_counter()
         try:
             reranked_child_docs = rerank_child_docs(
@@ -169,13 +183,13 @@ def build_chat_graph(runtime: ChatGraphRuntime):
             next_state = {
                 "reranked_child_docs": list(state.get("fused_child_docs", [])),
                 "errors": _append_error(state, "rerank_results", exc),
-                "warnings": list(state.get("warnings", []))
-                + ["rerank failed, fallback to fused results"],
+                "warnings": list(state.get("warnings", [])) + ["重排失败，已回退为融合结果"],
             }
         next_state["metrics"] = _time_node(state | next_state, "rerank_results", started_at)
         return next_state
 
     def diversify_results_node(state: ChatGraphState) -> ChatGraphState:
+        """使用 MMR 对候选片段做去冗余。"""
         started_at = perf_counter()
         try:
             diversified_child_docs = apply_mmr(
@@ -190,13 +204,13 @@ def build_chat_graph(runtime: ChatGraphRuntime):
             next_state = {
                 "diversified_child_docs": list(state.get("reranked_child_docs", [])),
                 "errors": _append_error(state, "diversify_results", exc),
-                "warnings": list(state.get("warnings", []))
-                + ["mmr failed, fallback to reranked results"],
+                "warnings": list(state.get("warnings", [])) + ["MMR 去冗余失败，已回退为重排结果"],
             }
         next_state["metrics"] = _time_node(state | next_state, "diversify_results", started_at)
         return next_state
 
     def expand_parent_context_node(state: ChatGraphState) -> ChatGraphState:
+        """将命中的子片段回溯聚合到父片段。"""
         started_at = perf_counter()
         parent_docs = expand_to_parents(
             child_docs=state.get("diversified_child_docs", []),
@@ -216,12 +230,13 @@ def build_chat_graph(runtime: ChatGraphRuntime):
         return next_state
 
     def build_prompt_context_node(state: ChatGraphState) -> ChatGraphState:
+        """组装最终送给模型的上下文与引用信息。"""
         started_at = perf_counter()
         parent_docs = state.get("parent_docs", [])
         citations = [
             {
-                "source_file": doc.metadata.get("source_file", "unknown"),
-                "parent_id": doc.metadata.get("parent_id", "NA"),
+                "source_file": doc.metadata.get("source_file", "未知文件"),
+                "parent_id": doc.metadata.get("parent_id", "未标记"),
             }
             for doc in parent_docs
         ]
@@ -235,6 +250,7 @@ def build_chat_graph(runtime: ChatGraphRuntime):
         return next_state
 
     def decide_answer_route_node(state: ChatGraphState) -> ChatGraphState:
+        """根据上下文与权限情况决定走正常回答还是兜底回答。"""
         started_at = perf_counter()
         if state.get("route") == "deny":
             route = "deny"
@@ -249,6 +265,7 @@ def build_chat_graph(runtime: ChatGraphRuntime):
         return next_state
 
     def generate_answer_node(state: ChatGraphState) -> ChatGraphState:
+        """基于最终上下文生成答案。"""
         started_at = perf_counter()
         try:
             answer = generate_answer(
@@ -261,13 +278,13 @@ def build_chat_graph(runtime: ChatGraphRuntime):
             next_state = {
                 "answer": "根据当前检索到的资料，我不能确定。",
                 "errors": _append_error(state, "generate_answer", exc),
-                "warnings": list(state.get("warnings", []))
-                + ["answer generation failed, fallback answer returned"],
+                "warnings": list(state.get("warnings", [])) + ["答案生成失败，已返回兜底答案"],
             }
         next_state["metrics"] = _time_node(state | next_state, "generate_answer", started_at)
         return next_state
 
     def fallback_answer_node(state: ChatGraphState) -> ChatGraphState:
+        """统一处理无结果、无权限或链路降级时的兜底回答。"""
         started_at = perf_counter()
         if state.get("route") == "deny":
             answer = "当前请求没有足够权限访问相关知识内容。"
@@ -280,6 +297,7 @@ def build_chat_graph(runtime: ChatGraphRuntime):
         return next_state
 
     def record_observation_node(state: ChatGraphState) -> ChatGraphState:
+        """记录本次问答的调试信息和指标摘要。"""
         started_at = perf_counter()
         debug = dict(state.get("debug", {}))
         debug["rewritten_queries"] = state.get("rewritten_queries", [])
@@ -303,6 +321,7 @@ def build_chat_graph(runtime: ChatGraphRuntime):
         }
 
     def route_after_decision(state: ChatGraphState) -> str:
+        """供条件边使用的路由函数。"""
         return state.get("route", "fallback")
 
     graph = StateGraph(ChatGraphState)
@@ -325,7 +344,8 @@ def build_chat_graph(runtime: ChatGraphRuntime):
     graph.add_edge("init_request", "authorize_request")
     graph.add_edge("authorize_request", "rewrite_query")
     graph.add_edge("rewrite_query", "retrieve_dense")
-    graph.add_edge("retrieve_dense", "retrieve_sparse")
+    graph.add_edge("rewrite_query", "retrieve_sparse")
+    graph.add_edge("retrieve_dense", "fuse_results")
     graph.add_edge("retrieve_sparse", "fuse_results")
     graph.add_edge("fuse_results", "rerank_results")
     graph.add_edge("rerank_results", "diversify_results")
@@ -349,20 +369,23 @@ def build_chat_graph(runtime: ChatGraphRuntime):
 
 
 def summarize_state(state: ChatGraphState) -> str:
+    """将图执行摘要格式化为中文文本，便于 CLI 输出。"""
     lines = []
     for index, query in enumerate(state.get("rewritten_queries", []), 1):
         lines.append(f"{index}. {query}")
 
     lines.append("")
-    lines.append(f"[RRF 后 child 数] {len(state.get('fused_child_docs', []))}")
-    lines.append(f"[Rerank 后 child 数] {len(state.get('reranked_child_docs', []))}")
-    lines.append(f"[MMR 后 child 数] {len(state.get('diversified_child_docs', []))}")
-    lines.append(f"[最终 parent 数] {len(state.get('parent_docs', []))}")
+    lines.append(f"[向量检索分支数] {len(state.get('dense_ranked_lists', []))}")
+    lines.append(f"[关键词检索分支数] {len(state.get('sparse_ranked_lists', []))}")
+    lines.append(f"[RRF 融合后子片段数] {len(state.get('fused_child_docs', []))}")
+    lines.append(f"[重排后子片段数] {len(state.get('reranked_child_docs', []))}")
+    lines.append(f"[MMR 去冗余后子片段数] {len(state.get('diversified_child_docs', []))}")
+    lines.append(f"[最终父片段数] {len(state.get('parent_docs', []))}")
     return "\n".join(lines)
 
 
 def format_parent_docs_preview(docs: list[Document]) -> str:
+    """格式化父片段预览。"""
     if not docs:
         return ""
     return format_docs(docs)
-
