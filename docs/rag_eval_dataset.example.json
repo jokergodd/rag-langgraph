@@ -1,0 +1,11 @@
+[
+  {
+    "name": "replace-with-your-first-case",
+    "question": "Replace this with a real question from your knowledge base.",
+    "expected_answer": "Write the reference answer you expect the RAG system to produce.",
+    "expected_context": [
+      "Paste one or more ground-truth snippets that should be retrieved for this question."
+    ],
+    "tags": ["retrieval", "faithfulness"]
+  }
+]
